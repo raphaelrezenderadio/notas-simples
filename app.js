@@ -11,9 +11,107 @@ const key=()=> 'ns-mobile-v1-'+mode, load=()=>JSON.parse(localStorage.getItem(ke
 function persist(){localStorage.setItem(key(),JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
 function render(){ $('mode').textContent=mode==='test'?'Teste':'Real';let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';}
 function commit(){clearTimeout(timer);if(!dirty||!active)return;let r=revision(active,$('text').value);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist();active=r;dirty=false;render();status('Salvo localmente · '+db.pending.length+' pendente(s)');}
-function open(r){commit();active=r;$('text').disabled=false;$('text').value=r.text;document.body.classList.add('editing');render()}
-$('text').oninput=()=>{try{dirty=true;db.draft={base:active,text:$('text').value};persist();$('title').textContent=title({text:$('text').value});status('Rascunho salvo neste dispositivo');clearTimeout(timer);timer=setTimeout(()=>{try{commit();sync()}catch(e){status(e.message)}},900)}catch(e){status('Falha ao salvar localmente: '+e.message)}};
-$('new').onclick=()=>{try{commit();let r=revision(null,'');db.rows.push(r);db.pending.push(r.id);persist();open(r);$('text').focus();sync()}catch(e){status(e.message)}};
+const uncheckedItem='☐', checkedItem='☑';
+const noteText=$('text'), checklistView=$('checklistView'), checklistMode=$('checklistMode');
+let markingItems=false;
+
+function itemAt(text,start){
+ const marker=text[start], after=text[start+1];
+ return (marker===uncheckedItem||marker===checkedItem) &&
+  (after===undefined||after===' '||after==='\n');
+}
+function lineStart(text,offset){
+ return offset===0?0:text.lastIndexOf('\n',offset-1)+1;
+}
+function hasChecklist(text){return /^[☐☑](?: |$)/m.test(text)}
+function setChecklistView(mark,focus=false){
+ markingItems=mark&&!noteText.disabled;
+ checklistMode.hidden=noteText.disabled||!hasChecklist(noteText.value);
+ $('checklistItem').hidden=noteText.disabled;
+ checklistMode.setAttribute('aria-pressed',String(markingItems));
+ checklistMode.textContent=markingItems?'Editar texto':'Marcar itens';
+ checklistView.hidden=!markingItems;
+ noteText.hidden=markingItems;
+ if(markingItems)renderChecklist();
+ else if(focus)noteText.focus();
+}
+function renderChecklist(){
+ const text=noteText.value;
+ let offset=0;
+ const rows=text.split('\n').map(line=>{
+  const start=offset;
+  offset+=line.length+1;
+  const row=document.createElement('div');
+  if(!itemAt(text,start)){
+   row.className='checklist-text';
+   row.textContent=line;
+   return row;
+  }
+  row.className='checklist-row';
+  const button=document.createElement('button');
+  const label=document.createElement('span');
+  label.textContent=line.slice(line[1]===' '?2:1);
+  button.type='button';
+  button.setAttribute('role','checkbox');
+  button.setAttribute('aria-label',label.textContent.trim()||'Item sem texto');
+  const update=()=>{
+   const checked=noteText.value[start]===checkedItem;
+   button.textContent=checked?'✓':'';
+   button.setAttribute('aria-checked',String(checked));
+  };
+  update();
+  button.onclick=()=>{
+   if(!itemAt(noteText.value,start))return;
+   noteText.setRangeText(noteText.value[start]===checkedItem?uncheckedItem:checkedItem,start,start+1,'preserve');
+   noteChanged();
+   update();
+  };
+  row.append(button,label);
+  return row;
+ });
+ checklistView.replaceChildren(...rows);
+}
+function editText(start,end,replacement,caret){
+ noteText.setRangeText(replacement,start,end,'end');
+ if(caret!==undefined)noteText.setSelectionRange(caret,caret);
+ noteChanged();
+}
+function addChecklistItem(){
+ if(noteText.disabled)return;
+ setChecklistView(false,true);
+ const text=noteText.value;
+ const start=lineStart(text,noteText.selectionStart);
+ if(itemAt(text,start)){
+  const length=text[start+1]===' '?2:1;
+  editText(start,start+length,'',Math.max(start,noteText.selectionStart-length));
+ }else editText(start,start,uncheckedItem+' ',noteText.selectionStart+2);
+}
+function continueChecklist(event){
+ if(event.isComposing||!event.cancelable||noteText.selectionStart!==noteText.selectionEnd)return;
+ const text=noteText.value, caret=noteText.selectionStart, start=lineStart(text,caret);
+ if(!itemAt(text,start)||caret<=start)return;
+ const nextLine=text.indexOf('\n',start);
+ const end=nextLine<0?text.length:nextLine;
+ event.preventDefault();
+ if(!text.slice(start+1,end).trim())editText(start,end,'');
+ else{
+  const split=Math.max(caret,start+(text[start+1]===' '?2:1));
+  editText(split,split,'\n'+uncheckedItem+' ');
+ }
+}
+$('checklistItem').onclick=addChecklistItem;
+checklistMode.onclick=()=>setChecklistView(!markingItems,markingItems);
+noteText.addEventListener('keydown',event=>{
+ if(event.key==='Enter'&&!event.shiftKey&&!event.ctrlKey&&!event.altKey&&!event.metaKey)continueChecklist(event);
+});
+noteText.addEventListener('beforeinput',event=>{
+ if(event.inputType==='insertLineBreak'||event.inputType==='insertParagraph')continueChecklist(event);
+});
+
+function open(r){commit();active=r;$('text').disabled=false;$('text').value=r.text;setChecklistView(hasChecklist(noteText.value));document.body.classList.add('editing');render()}
+function noteChanged(){try{checklistMode.hidden=!hasChecklist(noteText.value);dirty=true;db.draft={base:active,text:$('text').value};persist();$('title').textContent=title({text:$('text').value});status('Rascunho salvo neste dispositivo');clearTimeout(timer);timer=setTimeout(()=>{try{commit();sync()}catch(e){status(e.message)}},900)}catch(e){status('Falha ao salvar localmente: '+e.message)}}
+noteText.oninput=noteChanged;
+$('new').onclick=()=>{try{commit();let r=revision(null,'');db.rows.push(r);db.pending.push(r.id);persist();open(r);noteText.focus();sync()}catch(e){status(e.message)}};
 $('back').onclick=()=>{commit();if(matchMedia('(max-width:650px)').matches)document.body.classList.remove('editing');else $('list').classList.toggle('hidden')};$('search').oninput=render;$('menu').onclick=()=>$('settings').showModal();$('close').onclick=()=>$('settings').close();$('sync').onclick=()=>sync();
 const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 async function login(){commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem('ns-auth',JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
@@ -185,8 +283,8 @@ async function sync(){
   persist();
   if(active&&!dirty&&!heads(db.rows).some(r=>r.id===active.id)){
    const candidates=heads(db.rows).filter(r=>r.note===active.note&&r.state!=='D');
-   if(candidates.length===1){active=candidates[0];$('text').value=active.text}
-   else{active=null;$('text').value='';$('text').disabled=true;document.body.classList.remove('editing')}
+   if(candidates.length===1){active=candidates[0];noteText.value=active.text;setChecklistView(markingItems&&hasChecklist(noteText.value))}
+   else{active=null;$('text').value='';$('text').disabled=true;setChecklistView(false);document.body.classList.remove('editing')}
   }
   render();
   status('OneDrive atualizado · '+db.pending.length+' pendente(s)');
@@ -221,6 +319,7 @@ $('real').onclick=()=>{
  dirty=false;
  $('text').value='';
  $('text').disabled=true;
+ setChecklistView(false);
  document.body.classList.remove('editing');
  render();
  $('settings').close();
@@ -263,7 +362,7 @@ $('downloadReport').onclick=()=>{let u=URL.createObjectURL(new Blob([$('report')
 $('diagnose').onclick=async()=>{
  if(starting||diagnosing)return;
  if(mode!=='test'){status('Volte ao modo Teste antes de executar o diagnóstico');$('settings').close();return}
- $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.4\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
+ $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.5\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
  const log=s=>{$('report').textContent+=s+'\n'};const check=(ok,name)=>{if(!ok)throw Error(name);log('OK: '+name)};
  let folder=null, passed=false, owned=false;
  try{
