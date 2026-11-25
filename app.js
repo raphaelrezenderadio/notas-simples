@@ -22,3 +22,31 @@ async function sync(){if(running)return;try{commit();if(!token&&!refresh){status
 $('login').onclick=()=>login().catch(e=>status(e.message));$('logout').onclick=()=>{commit();token=null;refresh=null;expiry=0;status('Sessão encerrada neste aplicativo');$('settings').close()};$('real').onclick=()=>{if(running)return;commit();if(mode==='test'&&!confirm('Acessar notas reais? Faça backup dos Dados no Windows antes.'))return;mode=mode==='test'?'real':'test';localStorage.setItem('ns-mode',mode);db=load();active=null;dirty=false;$('text').value='';$('text').disabled=true;document.body.classList.remove('editing');render();$('settings').close();sync()};
 if(db.draft){let r=revision(db.draft.base,db.draft.text);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist()};render();window.addEventListener('pagehide',()=>{try{commit()}catch{}});window.addEventListener('online',sync);setInterval(()=>{if(document.visibilityState==='visible'&&(token||refresh))sync()},30000);
 (async()=>{let p=new URLSearchParams(location.search);if(p.has('code')||p.has('error')){let saved=JSON.parse(sessionStorage.getItem('ns-auth')||'null');history.replaceState(null,'',redirect);sessionStorage.removeItem('ns-auth');if(p.has('error'))throw Error(p.get('error_description')||p.get('error'));if(!saved||saved.state!==p.get('state'))throw Error('Sessão de autenticação inválida; entre novamente');await exchange({grant_type:'authorization_code',code:p.get('code'),code_verifier:saved.verifier});await sync()}if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{})})().catch(e=>status(e.message));
+
+// Diagnostic uses only a unique dedicated folder; never reads production data.
+let diagnosing=false;
+$('closeReport').onclick=()=>{if(!diagnosing)$('diagnostic').close()};
+$('downloadReport').onclick=()=>{let u=URL.createObjectURL(new Blob([$('report').textContent],{type:'text/plain;charset=utf-8'}));let a=document.createElement('a');a.href=u;a.download='Relatorio_Notas_Mobile.txt';a.click();setTimeout(()=>URL.revokeObjectURL(u),30000)};
+$('diagnose').onclick=async()=>{
+ if(diagnosing||running){status('Aguarde a sincronização atual');return}
+ if(mode!=='test'){status('Volte ao modo Teste antes de executar o diagnóstico');$('settings').close();return}
+ $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.1\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;running=true;$('real').disabled=true;$('closeReport').disabled=true;
+ const log=s=>{$('report').textContent+=s+'\n'};const check=(ok,name)=>{if(!ok)throw Error(name);log('OK: '+name)};
+ let folder=null, passed=false;
+ try{
+  await auth();log('OK: autenticação Microsoft');
+  let a=revision(null,'Diagnóstico fictício: ação, ç, ã, 📝\r\nSegunda linha');let b=revision(a,'Versão A');let c=revision(a,'Versão B');
+  check((await parse(await serialize(a))).text===a.text,'UTF-8 e checksum');
+  let rejected=false;try{await parse((await serialize(a)).replace('NS2','NS3'))}catch{rejected=true}check(rejected,'Rejeição de revisão inválida');
+  check(heads([a,b,c]).length===2,'Preservação local de conflitos');
+  let name='NotasSimplesDiagnostico_'+id();let created=await (await req('/me/drive/root/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
+  let basePath='/me/drive/items/'+encodeURIComponent(folder);
+  for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
+  log('OK: gravação de três revisões fictícias');
+  let listing=await (await req(basePath+'/children')).json();let recovered=[];
+  for(let r of [a,b,c]){let f=listing.value.find(x=>x.name===r.id+'.rev');check(!!f,'Localização da revisão '+(r===a?'original':r===b?'A':'B'));let meta=await (await req('/me/drive/items/'+encodeURIComponent(f.id))).json();let u=meta['@microsoft.graph.downloadUrl'];if(!u||new URL(u).protocol!=='https:')throw Error('URL de download indisponível');let resp=await fetch(u,{cache:'no-store'});if(!resp.ok)throw Error('Leitura HTTP '+resp.status);let parsed=await parse(await resp.text());check(await serialize(parsed)===await serialize(r),'Leitura e integridade da revisão');recovered.push(parsed)}
+  check(heads(recovered).length===2,'Conflitos preservados após leitura do OneDrive');
+  let snapshot='Nota fictícia em TXT: português';let item=await (await req(basePath+':/teste.txt:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body:snapshot})).json();let m=await (await req('/me/drive/items/'+encodeURIComponent(item.id))).json();let u=m['@microsoft.graph.downloadUrl'];if(!u||new URL(u).protocol!=='https:')throw Error('URL de download TXT indisponível');let response=await fetch(u,{cache:'no-store'});check(response.ok&&await response.text()===snapshot,'Gravação e leitura TXT');passed=true;
+ }catch(e){log('FALHA: '+(e.code?'HTTP '+e.code:String(e.message).replace(/https?:\/\/\S+/g,'[URL omitida]').slice(0,300)))}
+ finally{if(folder){try{await req('/me/drive/items/'+encodeURIComponent(folder),{method:'DELETE'});log('OK: pasta fictícia removida (lixeira do OneDrive)')}catch{log('AVISO: pasta fictícia não removida; pode excluir NotasSimplesDiagnostico_ no OneDrive')}}log(passed?'RESULTADO: DIAGNÓSTICO APROVADO':'RESULTADO: DIAGNÓSTICO INCOMPLETO OU REPROVADO');log('NÃO TESTADO: sincronização real Windows/iPhone/Android, execução offline após reinício e aparência.');diagnosing=false;running=false;$('real').disabled=false;$('closeReport').disabled=false;$('downloadReport').disabled=false;}
+};
