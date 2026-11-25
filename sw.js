@@ -1,5 +1,5 @@
-const CACHE='notas-mobile-v6';
-const FILES=['./index.html','./style.css?v=15','./app.js?v=15','./format.js?v=14','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
+const CACHE='notas-mobile-v7';
+const FILES=['./index.html','./style.css?v=15','./app.js?v=16','./format.js?v=14','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 const assets=new Set(FILES.map(path=>new URL(path,self.registration.scope).href));
 
 self.addEventListener('install',event=>{

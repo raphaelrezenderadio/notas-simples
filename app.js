@@ -1,13 +1,31 @@
 import {id,revision,serialize,parse,heads} from './format.js?v=14';
-const $=x=>document.getElementById(x), client='38b4d77f-1296-420f-ab3f-e08c53455a8f', redirect='https://raphaelrezenderadio.github.io/notas-simples/', authority='https://login.microsoftonline.com/consumers/oauth2/v2.0/', scope='openid profile offline_access https://graph.microsoft.com/Files.ReadWrite', graph='https://graph.microsoft.com/v1.0';
-let mode=localStorage.getItem('ns-mode')||'test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
+const $=x=>document.getElementById(x), client='', redirect='https://raphaelrezenderadio.github.io/notas-simples/', authority='https://login.microsoftonline.com/consumers/oauth2/v2.0/', fileScope='https://graph.microsoft.com/Files.ReadWrite.AppFolder', scope='openid profile offline_access '+fileScope, graph='https://graph.microsoft.com/v1.0';
+let mode=localStorage.getItem('ns-restrito-mode')||'test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
 let diagnosing=false, starting=true;
-const sessionKey='ns-ms-session-v1';
-function storeSession(){try{sessionStorage.setItem(sessionKey,JSON.stringify({token,expiry,refresh}))}catch{}}
-function restoreSession(){try{let x=JSON.parse(sessionStorage.getItem(sessionKey)||'null');if(x){token=x.token||null;expiry=Number(x.expiry)||0;refresh=x.refresh||null}}catch{}}
-function clearSession(){token=null;refresh=null;expiry=0;try{sessionStorage.removeItem(sessionKey)}catch{}updateControls()}
+const sessionKey='ns-ms-appfolder-v1-'+client;
+const authKey='ns-auth-appfolder-v1-'+client;
+const approvedScopes=new Set(['openid','profile','offline_access','email','files.readwrite.appfolder']);
+let grantedScope='';
+function storeSession(){try{sessionStorage.setItem(sessionKey,JSON.stringify({token,expiry,refresh,scope:grantedScope}))}catch{}}
+function restrictedScope(value){
+ const scopes=typeof value==='string'?value.toLowerCase().trim().split(/\s+/)
+  .map(scope=>scope.replace(/^https:\/\/graph\.microsoft\.com\//,'')):[];
+ return scopes.includes('files.readwrite.appfolder')&&scopes.every(scope=>approvedScopes.has(scope));
+}
+function restoreSession(){
+ try{
+  sessionStorage.removeItem('ns-ms-session-v1');
+  sessionStorage.removeItem('ns-auth');
+  const saved=JSON.parse(sessionStorage.getItem(sessionKey)||'null');
+  if(client&&saved&&restrictedScope(saved.scope)){
+   token=saved.token||null; expiry=Number(saved.expiry)||0;
+   refresh=saved.refresh||null; grantedScope=saved.scope;
+  }
+ }catch{}
+}
+function clearSession(){token=null;refresh=null;expiry=0;grantedScope='';try{sessionStorage.removeItem(sessionKey)}catch{}updateControls()}
 restoreSession();
-const key=()=> 'ns-mobile-v1-'+mode, load=()=>JSON.parse(localStorage.getItem(key())||'{"rows":[],"pending":[],"draft":null}');let db=load();
+const key=()=> 'ns-mobile-appfolder-v1-'+mode, load=()=>JSON.parse(localStorage.getItem(key())||'{"rows":[],"pending":[],"draft":null}');let db=load();
 function persist(){localStorage.setItem(key(),JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
 function render(){ $('mode').textContent=mode==='test'?'Teste':'Real';let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';}
 function commit(){clearTimeout(timer);if(!dirty||!active)return;let r=revision(active,$('text').value);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist();active=r;dirty=false;render();status('Salvo localmente · '+db.pending.length+' pendente(s)');}
@@ -114,12 +132,13 @@ noteText.oninput=noteChanged;
 $('new').onclick=()=>{try{commit();let r=revision(null,'');db.rows.push(r);db.pending.push(r.id);persist();open(r);noteText.focus();sync()}catch(e){status(e.message)}};
 $('back').onclick=()=>{commit();if(matchMedia('(max-width:650px)').matches)document.body.classList.remove('editing');else $('list').classList.toggle('hidden')};$('search').oninput=render;$('menu').onclick=()=>$('settings').showModal();$('close').onclick=()=>$('settings').close();$('sync').onclick=()=>sync();
 const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
-async function login(){commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem('ns-auth',JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
+async function login(){if(!client)throw Error('Login restrito ainda não configurado');commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem(authKey,JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
 function updateControls(){
  const busy=starting||running||diagnosing;
  for(const name of ['login','logout','real']) $(name).disabled=busy;
+ $('login').disabled=busy||!client;
  $('diagnose').disabled=starting||diagnosing;
- $('account').textContent=starting?'Retomando sessão Microsoft…':
+ $('account').textContent=!client?'Login restrito ainda não configurado':starting?'Retomando sessão Microsoft…':
   token||refresh?'Sessão Microsoft neste navegador':'Microsoft desconectado';
 }
 async function exchange(fields){
@@ -133,6 +152,11 @@ async function exchange(fields){
   error.oauthCode=result.error;
   throw error;
  }
+ if(!restrictedScope(result.scope)){
+  clearSession();
+  throw Error('Permissão rejeitada. O Notas Simples exige acesso limitado à pasta do aplicativo.');
+ }
+ grantedScope=result.scope;
  const lifetime=Number(result.expires_in);
  if(!result.access_token||!Number.isFinite(lifetime)||lifetime<=0)throw Error('Resposta de autenticação inválida');
  token=result.access_token;
@@ -171,7 +195,7 @@ async function timedFetch(url,opt={}){
 async function req(path,opt={}){
  const url=new URL(path.startsWith('https://')?path:graph+path);
  if(url.origin!=='https://graph.microsoft.com')throw Error('URL Graph inválida');
- const send=async()=>timedFetch(url,{...opt,cache:'no-store',headers:{...opt.headers,Authorization:'Bearer '+await auth()}});
+ const send=async()=>timedFetch(url,{...opt,cache:'no-store',redirect:'error',headers:{...opt.headers,Authorization:'Bearer '+await auth()}});
  let response=await send();
  if(response.status===401&&refresh){
   expiry=0;
@@ -184,26 +208,38 @@ async function req(path,opt={}){
  }
  return response;
 }
-const base=()=>mode==='real'?['OUTROS ARQUIVOS','Programador','NotasSimples','Dados']:['NotasSimplesMobileTeste','Dados'];const path=a=>'/me/drive/root:/'+a.map(encodeURIComponent).join('/');
-async function ensure(a){
- for(let i=0;i<a.length;i++){
-  const parts=a.slice(0,i+1);
+const itemUrl=id=>'/me/drive/items/'+encodeURIComponent(id);
+const path=(root,parts)=>itemUrl(root)+':/'+parts.map(encodeURIComponent).join('/');
+const base=()=>mode==='real'?['Dados']:['Teste','Dados'];
+async function appRoot(){
+ const item=await (await req('/me/drive/special/approot')).json();
+ if(typeof item.id!=='string'||!item.id||!item.folder)throw Error('Pasta do aplicativo indisponível');
+ const bindingKey='ns-appfolder-root-v1-'+client;
+ const bound=localStorage.getItem(bindingKey);
+ if(bound&&bound!==item.id)throw Error('Entre com a mesma conta Microsoft usada neste dispositivo.');
+ if(!bound)localStorage.setItem(bindingKey,item.id);
+ return item.id;
+}
+async function ensure(root,parts){
+ for(let i=0;i<parts.length;i++){
+  const prefix=parts.slice(0,i+1);
+  const folderPath=path(root,prefix);
   let item;
   try{
-   item=await (await req(path(parts))).json();
+   item=await (await req(folderPath)).json();
   }catch(error){
    if(error.code!==404)throw error;
-   if(mode==='real')throw Error('Pasta real não encontrada: '+parts.join('/'));
-   const parent=i?path(parts.slice(0,-1))+':/children':'/me/drive/root/children';
+   if(mode==='real')throw Error('Copie a pasta Dados do Windows para a pasta do aplicativo no OneDrive.');
+   const parent=i?path(root,prefix.slice(0,-1))+':/children':itemUrl(root)+'/children';
    try{
     item=await (await req(parent,{method:'POST',headers:{'Content-Type':'application/json'},
-     body:JSON.stringify({name:parts.at(-1),folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();
+     body:JSON.stringify({name:prefix.at(-1),folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();
    }catch(conflict){
     if(conflict.code!==409)throw conflict;
-    item=await (await req(path(parts))).json();
+    item=await (await req(folderPath)).json();
    }
   }
-  if(!item.folder)throw Error('Não é pasta: '+parts.at(-1));
+  if(!item.folder)throw Error('Não é pasta: '+prefix.at(-1));
  }
 }
 async function downloadFile(item){
@@ -217,8 +253,8 @@ async function downloadFile(item){
  if(!response.ok)throw Error('Falha ao ler arquivo do OneDrive: HTTP '+response.status);
  return response.text();
 }
-async function remoteRows(a){
- let next=path(a)+':/children?$select=id,name,folder,file,@microsoft.graph.downloadUrl&$top=200';
+async function remoteRows(root,parts){
+ let next=path(root,parts)+':/children?$select=id,name,folder,file,@microsoft.graph.downloadUrl&$top=200';
  const out=[];
  const pending=new Set(db.pending);
  const cached=new Map(db.rows.filter(r=>!pending.has(r.id)).map(r=>[r.id+'.rev',r]));
@@ -234,8 +270,8 @@ async function remoteRows(a){
  }
  return out;
 }
-async function upload(a,body,normalize=text=>text){
- const itemPath=path(a);
+async function upload(root,parts,body,normalize=text=>text){
+ const itemPath=path(root,parts);
  try{
   await req(itemPath+':/content?@microsoft.graph.conflictBehavior=fail',{
    method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body
@@ -257,10 +293,11 @@ async function sync(){
   running=true;
   updateControls();
   status('Sincronizando…');
+  const root=await appRoot();
   const a=base(), historyPath=a.concat('Historico'), textsPath=a.concat('Textos');
-  await ensure(historyPath);
-  await ensure(textsPath);
-  const remote=await remoteRows(historyPath);
+  await ensure(root,historyPath);
+  await ensure(root,textsPath);
+  const remote=await remoteRows(root,historyPath);
   const known=new Map(remote.map(r=>[r.id,r]));
   const rows=new Map(db.rows.map(r=>[r.id,r]));
   for(const pending of [...db.pending]){
@@ -270,8 +307,8 @@ async function sync(){
    if(known.has(row.id)){
     if(await serialize(known.get(row.id))!==body)throw Error('Conflito de identificador. Revisão local preservada.');
    }else{
-    await upload(textsPath.concat(row.note+'.'+row.id+'.txt'),row.text);
-    await upload(historyPath.concat(row.id+'.rev'),body,async text=>serialize(await parse(text)));
+    await upload(root,textsPath.concat(row.note+'.'+row.id+'.txt'),row.text);
+    await upload(root,historyPath.concat(row.id+'.rev'),body,async text=>serialize(await parse(text)));
     known.set(row.id,row);
    }
    db.pending=db.pending.filter(id=>id!==pending);
@@ -313,7 +350,7 @@ $('real').onclick=()=>{
  commit();
  if(mode==='test'&&!confirm('Acessar notas reais? Faça backup dos Dados no Windows antes.'))return;
  mode=mode==='test'?'real':'test';
- localStorage.setItem('ns-mode',mode);
+ localStorage.setItem('ns-restrito-mode',mode);
  db=load();
  active=null;
  dirty=false;
@@ -334,9 +371,9 @@ async function start(){
  try{
   const query=new URLSearchParams(location.search);
   if(query.has('code')||query.has('error')){
-   const raw=sessionStorage.getItem('ns-auth');
+   const raw=sessionStorage.getItem(authKey);
    history.replaceState(null,'',new URL(redirect).pathname);
-   sessionStorage.removeItem('ns-auth');
+   sessionStorage.removeItem(authKey);
    const saved=JSON.parse(raw||'null');
    if(!saved?.verifier||!saved?.state||saved.state!==query.get('state')){
     throw Error('Não foi possível retomar o login nesta janela. Entre novamente.');
@@ -362,7 +399,7 @@ $('downloadReport').onclick=()=>{let u=URL.createObjectURL(new Blob([$('report')
 $('diagnose').onclick=async()=>{
  if(starting||diagnosing)return;
  if(mode!=='test'){status('Volte ao modo Teste antes de executar o diagnóstico');$('settings').close();return}
- $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.5\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
+ $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.6\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
  const log=s=>{$('report').textContent+=s+'\n'};const check=(ok,name)=>{if(!ok)throw Error(name);log('OK: '+name)};
  let folder=null, passed=false, owned=false;
  try{
@@ -373,8 +410,8 @@ $('diagnose').onclick=async()=>{
   check((await parse(await serialize(a))).text===a.text,'UTF-8 e checksum');
   let rejected=false;try{await parse((await serialize(a)).replace('NS2','NS3'))}catch{rejected=true}check(rejected,'Rejeição de revisão inválida');
   check(heads([a,b,c]).length===2,'Preservação local de conflitos');
-  await auth();log('OK: autenticação Microsoft');
-  let name='NotasSimplesDiagnostico_'+id();let created=await (await req('/me/drive/root/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
+  const root=await appRoot();log('OK: autenticação Microsoft com acesso limitado à pasta do aplicativo');
+  let name='NotasSimplesDiagnostico_'+id();let created=await (await req(itemUrl(root)+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
   let basePath='/me/drive/items/'+encodeURIComponent(folder);
   for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
   log('OK: gravação de três revisões fictícias');
