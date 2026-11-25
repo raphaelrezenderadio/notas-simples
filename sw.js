@@ -1,1 +1,36 @@
-const CACHE='notas-mobile-v4';const FILES=['./','./index.html','./style.css','./app.js?v=13','./format.js','./manifest.webmanifest','./icon-192.png','./icon-512.png'];self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(FILES)).then(()=>self.skipWaiting())));self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k.startsWith('notas-mobile-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||new URL(e.request.url).origin!==self.location.origin)return;if(e.request.mode==='navigate'){e.respondWith(fetch(e.request).catch(()=>caches.match('./index.html')));return}e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))})
+const CACHE='notas-mobile-v5';
+const FILES=['./index.html','./style.css','./app.js?v=14','./format.js?v=14','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
+const assets=new Set(FILES.map(path=>new URL(path,self.registration.scope).href));
+
+self.addEventListener('install',event=>{
+ event.waitUntil((async()=>{
+  const cache=await caches.open(CACHE);
+  await cache.addAll(FILES.map(path=>new Request(path,{cache:'reload'})));
+  await self.skipWaiting();
+ })());
+});
+
+self.addEventListener('activate',event=>{
+ event.waitUntil((async()=>{
+  const names=await caches.keys();
+  await Promise.all(names.filter(name=>name.startsWith('notas-mobile-')&&name!==CACHE).map(name=>caches.delete(name)));
+  await self.clients.claim();
+ })());
+});
+
+self.addEventListener('fetch',event=>{
+ const request=event.request;
+ if(request.method!=='GET'||!request.url.startsWith(self.registration.scope))return;
+ const navigation=request.mode==='navigate';
+ if(!navigation&&!assets.has(request.url))return;
+ event.respondWith((async()=>{
+  let response;
+  try{
+   response=await fetch(request,{cache:'no-cache'});
+   if(response.ok)return response;
+  }catch{}
+  const cache=await caches.open(CACHE);
+  const fallback=await cache.match(navigation?'./index.html':request);
+  return fallback||response||Response.error();
+ })());
+});

@@ -1,10 +1,11 @@
-import {id,revision,serialize,parse,heads} from './format.js';
+import {id,revision,serialize,parse,heads} from './format.js?v=14';
 const $=x=>document.getElementById(x), client='38b4d77f-1296-420f-ab3f-e08c53455a8f', redirect='https://raphaelrezenderadio.github.io/notas-simples/', authority='https://login.microsoftonline.com/consumers/oauth2/v2.0/', scope='openid profile offline_access https://graph.microsoft.com/Files.ReadWrite', graph='https://graph.microsoft.com/v1.0';
 let mode=localStorage.getItem('ns-mode')||'test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
+let diagnosing=false, starting=true;
 const sessionKey='ns-ms-session-v1';
 function storeSession(){try{sessionStorage.setItem(sessionKey,JSON.stringify({token,expiry,refresh}))}catch{}}
 function restoreSession(){try{let x=JSON.parse(sessionStorage.getItem(sessionKey)||'null');if(x){token=x.token||null;expiry=Number(x.expiry)||0;refresh=x.refresh||null}}catch{}}
-function clearSession(){token=null;refresh=null;expiry=0;try{sessionStorage.removeItem(sessionKey)}catch{}}
+function clearSession(){token=null;refresh=null;expiry=0;try{sessionStorage.removeItem(sessionKey)}catch{}updateControls()}
 restoreSession();
 const key=()=> 'ns-mobile-v1-'+mode, load=()=>JSON.parse(localStorage.getItem(key())||'{"rows":[],"pending":[],"draft":null}');let db=load();
 function persist(){localStorage.setItem(key(),JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
@@ -16,45 +17,274 @@ $('new').onclick=()=>{try{commit();let r=revision(null,'');db.rows.push(r);db.pe
 $('back').onclick=()=>{commit();if(matchMedia('(max-width:650px)').matches)document.body.classList.remove('editing');else $('list').classList.toggle('hidden')};$('search').oninput=render;$('menu').onclick=()=>$('settings').showModal();$('close').onclick=()=>$('settings').close();$('sync').onclick=()=>sync();
 const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 async function login(){commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem('ns-auth',JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
-async function exchange(fields){let r=await timedFetch(authority+'token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:client,redirect_uri:redirect,scope,...fields})});let j=await r.json();if(!r.ok)throw Error(j.error_description||j.error||'Falha na autenticação');token=j.access_token;expiry=Date.now()+j.expires_in*1000;refresh=j.refresh_token||refresh;storeSession();}
-async function auth(){if(token&&Date.now()<expiry-60000)return token;if(refresh){try{await exchange({grant_type:'refresh_token',refresh_token:refresh});return token}catch(e){if(/invalid_grant|interaction_required|AADSTS/i.test(e.message))clearSession();throw e}}throw Error('Entre com Microsoft para sincronizar')}
-async function timedFetch(url,opt={}){const ctrl=new AbortController();const timeout=setTimeout(()=>ctrl.abort(),20000);try{return await fetch(url,{...opt,signal:ctrl.signal})}finally{clearTimeout(timeout)}}
-async function req(path,opt={}){let t=await auth();let url=path.startsWith('https://')?path:graph+path;if(new URL(url).origin!=='https://graph.microsoft.com')throw Error('URL Graph inválida');let r=await timedFetch(url,{...opt,headers:{Authorization:'Bearer '+t,...opt.headers}});if(!r.ok){let e=Error('OneDrive: HTTP '+r.status);e.code=r.status;throw e}return r}
+function updateControls(){
+ const busy=starting||running||diagnosing;
+ for(const name of ['login','logout','real']) $(name).disabled=busy;
+ $('diagnose').disabled=starting||diagnosing;
+ $('account').textContent=starting?'Retomando sessão Microsoft…':
+  token||refresh?'Sessão Microsoft neste navegador':'Microsoft desconectado';
+}
+async function exchange(fields){
+ const response=await timedFetch(authority+'token',{
+  method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:new URLSearchParams({client_id:client,redirect_uri:redirect,scope,...fields})
+ });
+ const result=await response.json();
+ if(!response.ok){
+  const error=Error(result.error_description||result.error||'Falha na autenticação');
+  error.oauthCode=result.error;
+  throw error;
+ }
+ const lifetime=Number(result.expires_in);
+ if(!result.access_token||!Number.isFinite(lifetime)||lifetime<=0)throw Error('Resposta de autenticação inválida');
+ token=result.access_token;
+ expiry=Date.now()+lifetime*1000;
+ refresh=result.refresh_token||(fields.grant_type==='refresh_token'?refresh:null);
+ storeSession();
+ updateControls();
+}
+async function auth(){
+ if(token&&Date.now()<expiry-60000)return token;
+ if(refresh){
+  try{
+   await exchange({grant_type:'refresh_token',refresh_token:refresh});
+   return token;
+  }catch(error){
+   if(['invalid_grant','interaction_required','login_required','consent_required'].includes(error.oauthCode)){
+    clearSession();
+    throw Error('Sessão Microsoft expirada. Entre novamente para sincronizar.');
+   }
+   throw error;
+  }
+ }
+ clearSession();
+ throw Error('Entre com Microsoft para sincronizar');
+}
+async function timedFetch(url,opt={}){
+ const ctrl=new AbortController();
+ const timeout=setTimeout(()=>ctrl.abort(),20000);
+ try{return await fetch(url,{...opt,signal:ctrl.signal})}
+ catch(error){
+  if(error.name==='AbortError')throw Error('Tempo limite de conexão');
+  if(error instanceof TypeError)throw Error('Falha de conexão');
+  throw error;
+ }finally{clearTimeout(timeout)}
+}
+async function req(path,opt={}){
+ const url=new URL(path.startsWith('https://')?path:graph+path);
+ if(url.origin!=='https://graph.microsoft.com')throw Error('URL Graph inválida');
+ const send=async()=>timedFetch(url,{...opt,cache:'no-store',headers:{...opt.headers,Authorization:'Bearer '+await auth()}});
+ let response=await send();
+ if(response.status===401&&refresh){
+  expiry=0;
+  response=await send();
+ }
+ if(!response.ok){
+  const error=Error('OneDrive: HTTP '+response.status);
+  error.code=response.status;
+  throw error;
+ }
+ return response;
+}
 const base=()=>mode==='real'?['OUTROS ARQUIVOS','Programador','NotasSimples','Dados']:['NotasSimplesMobileTeste','Dados'];const path=a=>'/me/drive/root:/'+a.map(encodeURIComponent).join('/');
-async function ensure(a){for(let i=0;i<a.length;i++){let p=a.slice(0,i+1);try{let j=await (await req(path(p))).json();if(!j.folder)throw Error('Não é pasta: '+p.at(-1))}catch(e){if(e.code!==404)throw e;if(mode==='real')throw Error('Pasta real não encontrada: '+p.join('/'));let parent=i?path(p.slice(0,-1))+':/children':'/me/drive/root/children';await req(parent,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:p.at(-1),folder:{},'@microsoft.graph.conflictBehavior':'fail'})})}}}
-async function remoteRows(){let a=base().concat('Historico'), next=path(a)+':/children?$select=id,name,folder,file,@microsoft.graph.downloadUrl&$top=200',out=[];while(next){let j=await (await req(next)).json();for(let f of j.value.filter(x=>x.name.endsWith('.rev')&&!x.folder)){let old=db.rows.find(r=>r.id+'.rev'===f.name&&!db.pending.includes(r.id));if(old){out.push(old);continue}let u=f['@microsoft.graph.downloadUrl'];if(!u){let meta=await (await req('/me/drive/items/'+encodeURIComponent(f.id))).json();u=meta['@microsoft.graph.downloadUrl']}if(!u||new URL(u).protocol!=='https:')throw Error('Download indisponível');let resp=await timedFetch(u,{cache:'no-store'});if(!resp.ok)throw Error('Falha ao ler revisão');out.push(await parse(await resp.text()))}next=j['@odata.nextLink']}return out}
-async function upload(a,body){await req(path(a)+':/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body})}
-async function sync(){if(running||diagnosing)return;try{commit();if(!token&&!refresh){status('Salvo localmente · entre com Microsoft para sincronizar');return}running=true;$('real').disabled=true;status('Sincronizando…');let a=base();await ensure(a.concat('Historico'));await ensure(a.concat('Textos'));let remote=await remoteRows();let known=new Map(remote.map(r=>[r.id,r]));for(let pending of [...db.pending]){let r=db.rows.find(x=>x.id===pending);if(!r)throw Error('Revisão pendente ausente');if(known.has(r.id)){if(await serialize(known.get(r.id))!==await serialize(r))throw Error('Conflito de identificador; dados preservados')}else{await upload(a.concat('Textos',r.note+'.'+r.id+'.txt'),r.text);await upload(a.concat('Historico',r.id+'.rev'),await serialize(r));known.set(r.id,r)}db.pending=db.pending.filter(x=>x!==pending);persist()}let merged=new Map(db.rows.map(r=>[r.id,r]));for(let r of known.values())merged.set(r.id,r);db.rows=[...merged.values()];persist();if(active&&!dirty&&!heads(db.rows).some(r=>r.id===active.id)){let h=heads(db.rows).filter(r=>r.note===active.note&&r.state!=='D');if(h.length===1){active=h[0];$('text').value=active.text}else{active=null;$('text').value='';$('text').disabled=true;document.body.classList.remove('editing')}}render();status('OneDrive atualizado · '+db.pending.length+' pendente(s)')}catch(e){status('Não sincronizado: '+e.message+' · dados locais preservados')}finally{running=false;$('real').disabled=false}}
-$('login').onclick=()=>login().catch(e=>status(e.message));$('logout').onclick=()=>{commit();clearSession();status('Sessão encerrada neste aplicativo');$('settings').close()};$('real').onclick=()=>{if(running)return;commit();if(mode==='test'&&!confirm('Acessar notas reais? Faça backup dos Dados no Windows antes.'))return;mode=mode==='test'?'real':'test';localStorage.setItem('ns-mode',mode);db=load();active=null;dirty=false;$('text').value='';$('text').disabled=true;document.body.classList.remove('editing');render();$('settings').close();sync()};
+async function ensure(a){
+ for(let i=0;i<a.length;i++){
+  const parts=a.slice(0,i+1);
+  let item;
+  try{
+   item=await (await req(path(parts))).json();
+  }catch(error){
+   if(error.code!==404)throw error;
+   if(mode==='real')throw Error('Pasta real não encontrada: '+parts.join('/'));
+   const parent=i?path(parts.slice(0,-1))+':/children':'/me/drive/root/children';
+   try{
+    item=await (await req(parent,{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({name:parts.at(-1),folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();
+   }catch(conflict){
+    if(conflict.code!==409)throw conflict;
+    item=await (await req(path(parts))).json();
+   }
+  }
+  if(!item.folder)throw Error('Não é pasta: '+parts.at(-1));
+ }
+}
+async function downloadFile(item){
+ let url=item['@microsoft.graph.downloadUrl'];
+ if(!url&&item.id){
+  const meta=await (await req('/me/drive/items/'+encodeURIComponent(item.id))).json();
+  url=meta['@microsoft.graph.downloadUrl'];
+ }
+ if(!url||new URL(url).protocol!=='https:')throw Error('Download indisponível');
+ const response=await timedFetch(url,{cache:'no-store',credentials:'omit'});
+ if(!response.ok)throw Error('Falha ao ler arquivo do OneDrive: HTTP '+response.status);
+ return response.text();
+}
+async function remoteRows(a){
+ let next=path(a)+':/children?$select=id,name,folder,file,@microsoft.graph.downloadUrl&$top=200';
+ const out=[];
+ const pending=new Set(db.pending);
+ const cached=new Map(db.rows.filter(r=>!pending.has(r.id)).map(r=>[r.id+'.rev',r]));
+ while(next){
+  const page=await (await req(next)).json();
+  for(const item of page.value){
+   if(item.folder||!item.name.endsWith('.rev'))continue;
+   const row=cached.get(item.name)||await parse(await downloadFile(item));
+   if(row.id+'.rev'!==item.name)throw Error('Nome de revisão incompatível com o conteúdo');
+   out.push(row);
+  }
+  next=page['@odata.nextLink'];
+ }
+ return out;
+}
+async function upload(a,body,normalize=text=>text){
+ const itemPath=path(a);
+ try{
+  await req(itemPath+':/content?@microsoft.graph.conflictBehavior=fail',{
+   method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body
+  });
+ }catch(error){
+  if(error.code!==409&&error.code!==412)throw error;
+  const item=await (await req(itemPath)).json();
+  if(await normalize(await downloadFile(item))!==await normalize(body)){
+   throw Error('Arquivo já existe com conteúdo diferente. Revisão local preservada.');
+  }
+ }
+}
+async function sync(){
+ if(starting||running||diagnosing)return;
+ try{
+  commit();
+  if(!token&&!refresh){status('Salvo localmente · entre com Microsoft para sincronizar');return}
+  if(!navigator.onLine){status('Sem conexão · alterações salvas neste dispositivo');return}
+  running=true;
+  updateControls();
+  status('Sincronizando…');
+  const a=base(), historyPath=a.concat('Historico'), textsPath=a.concat('Textos');
+  await ensure(historyPath);
+  await ensure(textsPath);
+  const remote=await remoteRows(historyPath);
+  const known=new Map(remote.map(r=>[r.id,r]));
+  const rows=new Map(db.rows.map(r=>[r.id,r]));
+  for(const pending of [...db.pending]){
+   const row=rows.get(pending);
+   if(!row)throw Error('Revisão pendente ausente');
+   const body=await serialize(row);
+   if(known.has(row.id)){
+    if(await serialize(known.get(row.id))!==body)throw Error('Conflito de identificador. Revisão local preservada.');
+   }else{
+    await upload(textsPath.concat(row.note+'.'+row.id+'.txt'),row.text);
+    await upload(historyPath.concat(row.id+'.rev'),body,async text=>serialize(await parse(text)));
+    known.set(row.id,row);
+   }
+   db.pending=db.pending.filter(id=>id!==pending);
+   persist();
+  }
+  const merged=new Map(db.rows.map(r=>[r.id,r]));
+  for(const row of known.values())merged.set(row.id,row);
+  db.rows=[...merged.values()];
+  persist();
+  if(active&&!dirty&&!heads(db.rows).some(r=>r.id===active.id)){
+   const candidates=heads(db.rows).filter(r=>r.note===active.note&&r.state!=='D');
+   if(candidates.length===1){active=candidates[0];$('text').value=active.text}
+   else{active=null;$('text').value='';$('text').disabled=true;document.body.classList.remove('editing')}
+  }
+  render();
+  status('OneDrive atualizado · '+db.pending.length+' pendente(s)');
+ }catch(error){
+  status('Não sincronizado: '+error.message+' · dados locais preservados');
+ }finally{
+  running=false;
+  updateControls();
+ }
+}
+$('login').onclick=async()=>{
+ if(starting||running||diagnosing)return;
+ starting=true;
+ updateControls();
+ try{await login()}catch(error){starting=false;updateControls();$('account').textContent=error.message;status(error.message)}
+};
+$('logout').onclick=()=>{
+ if(starting||running||diagnosing)return;
+ commit();
+ clearSession();
+ status('Sessão encerrada neste aplicativo');
+ $('settings').close();
+};
+$('real').onclick=()=>{
+ if(starting||running||diagnosing)return;
+ commit();
+ if(mode==='test'&&!confirm('Acessar notas reais? Faça backup dos Dados no Windows antes.'))return;
+ mode=mode==='test'?'real':'test';
+ localStorage.setItem('ns-mode',mode);
+ db=load();
+ active=null;
+ dirty=false;
+ $('text').value='';
+ $('text').disabled=true;
+ document.body.classList.remove('editing');
+ render();
+ $('settings').close();
+ sync();
+};
 if(db.draft){let r=revision(db.draft.base,db.draft.text);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist()};render();window.addEventListener('pagehide',()=>{try{commit()}catch{}});window.addEventListener('online',sync);setInterval(()=>{if(document.visibilityState==='visible'&&(token||refresh))sync()},30000);
-(async()=>{let p=new URLSearchParams(location.search);if(p.has('code')||p.has('error')){let saved=JSON.parse(sessionStorage.getItem('ns-auth')||'null');history.replaceState(null,'',redirect);sessionStorage.removeItem('ns-auth');if(p.has('error'))throw Error(p.get('error_description')||p.get('error'));if(!saved||saved.state!==p.get('state'))throw Error('Sessão de autenticação inválida; entre novamente');await exchange({grant_type:'authorization_code',code:p.get('code'),code_verifier:saved.verifier});await sync()}else if(token||refresh){await sync()}if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{})})().catch(e=>status(e.message));
+async function start(){
+ updateControls();
+ if('serviceWorker'in navigator){
+  navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).catch(()=>{});
+ }
+ try{
+  const query=new URLSearchParams(location.search);
+  if(query.has('code')||query.has('error')){
+   const raw=sessionStorage.getItem('ns-auth');
+   history.replaceState(null,'',new URL(redirect).pathname);
+   sessionStorage.removeItem('ns-auth');
+   const saved=JSON.parse(raw||'null');
+   if(!saved?.verifier||!saved?.state||saved.state!==query.get('state')){
+    throw Error('Não foi possível retomar o login nesta janela. Entre novamente.');
+   }
+   if(query.has('error'))throw Error('Login Microsoft interrompido. Entre novamente.');
+   await exchange({grant_type:'authorization_code',code:query.get('code'),code_verifier:saved.verifier});
+  }
+ }catch(error){
+  status(error.message);
+  starting=false;
+  updateControls();
+  $('account').textContent=error.message;
+  return;
+ }
+ starting=false;
+ updateControls();
+ if(token||refresh)await sync();
+}
 
-// Diagnostic uses only a unique dedicated folder; never reads production data.
-let diagnosing=false;
+// Diagnostic uses only a unique dedicated folder.
 $('closeReport').onclick=()=>{if(!diagnosing)$('diagnostic').close()};
 $('downloadReport').onclick=()=>{let u=URL.createObjectURL(new Blob([$('report').textContent],{type:'text/plain;charset=utf-8'}));let a=document.createElement('a');a.href=u;a.download='Relatorio_Notas_Mobile.txt';a.click();setTimeout(()=>URL.revokeObjectURL(u),30000)};
 $('diagnose').onclick=async()=>{
- if(diagnosing)return;
+ if(starting||diagnosing)return;
  if(mode!=='test'){status('Volte ao modo Teste antes de executar o diagnóstico');$('settings').close();return}
- $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.3\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;$('real').disabled=true;$('closeReport').disabled=true;
+ $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.4\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
  const log=s=>{$('report').textContent+=s+'\n'};const check=(ok,name)=>{if(!ok)throw Error(name);log('OK: '+name)};
  let folder=null, passed=false, owned=false;
  try{
   log('Aguardando sincronização anterior, se houver…');
   const deadline=Date.now()+120000;while(running){if(Date.now()>deadline)throw Error('Sincronização anterior ainda em andamento; tente novamente');await new Promise(r=>setTimeout(r,200));}
-  running=true;owned=true;await auth();log('OK: autenticação Microsoft');
+  running=true;owned=true;
   let a=revision(null,'Diagnóstico fictício: ação, ç, ã, 📝\r\nSegunda linha');let b=revision(a,'Versão A');let c=revision(a,'Versão B');
   check((await parse(await serialize(a))).text===a.text,'UTF-8 e checksum');
   let rejected=false;try{await parse((await serialize(a)).replace('NS2','NS3'))}catch{rejected=true}check(rejected,'Rejeição de revisão inválida');
   check(heads([a,b,c]).length===2,'Preservação local de conflitos');
+  await auth();log('OK: autenticação Microsoft');
   let name='NotasSimplesDiagnostico_'+id();let created=await (await req('/me/drive/root/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
   let basePath='/me/drive/items/'+encodeURIComponent(folder);
   for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
   log('OK: gravação de três revisões fictícias');
   let listing=await (await req(basePath+'/children')).json();let recovered=[];
-  for(let r of [a,b,c]){let f=listing.value.find(x=>x.name===r.id+'.rev');check(!!f,'Localização da revisão '+(r===a?'original':r===b?'A':'B'));let meta=await (await req('/me/drive/items/'+encodeURIComponent(f.id))).json();let u=meta['@microsoft.graph.downloadUrl'];if(!u||new URL(u).protocol!=='https:')throw Error('URL de download indisponível');let resp=await timedFetch(u,{cache:'no-store'});if(!resp.ok)throw Error('Leitura HTTP '+resp.status);let parsed=await parse(await resp.text());check(await serialize(parsed)===await serialize(r),'Leitura e integridade da revisão');recovered.push(parsed)}
+  for(let r of [a,b,c]){let f=listing.value.find(x=>x.name===r.id+'.rev');check(!!f,'Localização da revisão '+(r===a?'original':r===b?'A':'B'));let parsed=await parse(await downloadFile(f));check(await serialize(parsed)===await serialize(r),'Leitura e integridade da revisão');recovered.push(parsed)}
   check(heads(recovered).length===2,'Conflitos preservados após leitura do OneDrive');
-  let snapshot='Nota fictícia em TXT: português';let item=await (await req(basePath+':/teste.txt:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body:snapshot})).json();let m=await (await req('/me/drive/items/'+encodeURIComponent(item.id))).json();let u=m['@microsoft.graph.downloadUrl'];if(!u||new URL(u).protocol!=='https:')throw Error('URL de download TXT indisponível');let response=await timedFetch(u,{cache:'no-store'});check(response.ok&&await response.text()===snapshot,'Gravação e leitura TXT');passed=true;
+  let snapshot='Nota fictícia em TXT: português';let item=await (await req(basePath+':/teste.txt:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body:snapshot})).json();check(await downloadFile(item)===snapshot,'Gravação e leitura TXT');passed=true;
  }catch(e){log('FALHA: '+(e.code?'HTTP '+e.code:String(e.message).replace(/https?:\/\/\S+/g,'[URL omitida]').slice(0,300)))}
- finally{if(folder){try{await req('/me/drive/items/'+encodeURIComponent(folder),{method:'DELETE'});log('OK: pasta fictícia removida (lixeira do OneDrive)')}catch{log('AVISO: pasta fictícia não removida; pode excluir NotasSimplesDiagnostico_ no OneDrive')}}log(passed?'RESULTADO: DIAGNÓSTICO APROVADO':'RESULTADO: DIAGNÓSTICO INCOMPLETO OU REPROVADO');log('NÃO TESTADO: sincronização real Windows/iPhone/Android, execução offline após reinício e aparência.');diagnosing=false;if(owned)running=false;$('real').disabled=running;$('closeReport').disabled=false;$('downloadReport').disabled=false;}
+ finally{if(folder){try{await req('/me/drive/items/'+encodeURIComponent(folder),{method:'DELETE'});log('OK: pasta fictícia removida (lixeira do OneDrive)')}catch{log('AVISO: pasta fictícia não removida; pode excluir NotasSimplesDiagnostico_ no OneDrive')}}log(passed?'RESULTADO: DIAGNÓSTICO APROVADO':'RESULTADO: DIAGNÓSTICO INCOMPLETO OU REPROVADO');log('NÃO TESTADO: sincronização real Windows/iPhone/Android, execução offline após reinício e aparência.');diagnosing=false;if(owned)running=false;updateControls();$('closeReport').disabled=false;$('downloadReport').disabled=false;}
 };
+
+start();
