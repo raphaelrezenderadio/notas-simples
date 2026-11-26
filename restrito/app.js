@@ -1,6 +1,6 @@
 import {id,revision,serialize,parse,heads} from './format.js?v=14';
 const $=x=>document.getElementById(x), client='a5dd7257-54df-4026-bebc-817f7be96c9b', redirect='https://raphaelrezenderadio.github.io/notas-simples/restrito/', authority='https://login.microsoftonline.com/consumers/oauth2/v2.0/', fileScope='https://graph.microsoft.com/Files.ReadWrite.AppFolder', scope='openid profile offline_access '+fileScope, graph='https://graph.microsoft.com/v1.0';
-let mode='test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
+let mode=localStorage.getItem('ns-restrito-mode')==='real'?'real':'test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
 let diagnosing=false, starting=true;
 const sessionKey='ns-ms-appfolder-v1-'+client;
 const authKey='ns-auth-appfolder-v1-'+client;
@@ -135,8 +135,7 @@ const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/
 async function login(){if(!client)throw Error('Login restrito ainda não configurado');commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem(authKey,JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
 function updateControls(){
  const busy=starting||running||diagnosing;
- for(const name of ['login','logout']) $(name).disabled=busy;
- $('real').disabled=true;
+ for(const name of ['login','logout','real']) $(name).disabled=busy;
  $('login').disabled=busy||!client;
  $('diagnose').disabled=starting||diagnosing;
  $('account').textContent=!client?'Login restrito ainda não configurado':starting?'Retomando sessão Microsoft…':
@@ -345,6 +344,23 @@ $('logout').onclick=()=>{
  clearSession();
  status('Sessão encerrada neste aplicativo');
  $('settings').close();
+};
+$('real').onclick=()=>{
+ if(starting||running||diagnosing)return;
+ commit();
+ if(mode==='test'&&!confirm('Antes de abrir as notas reais, faça uma cópia de segurança no Windows e copie a pasta Dados inteira para OneDrive/Apps/Notas Simples Restrito. Deseja continuar?'))return;
+ mode=mode==='test'?'real':'test';
+ localStorage.setItem('ns-restrito-mode',mode);
+ db=load();
+ active=null;
+ dirty=false;
+ $('text').value='';
+ $('text').disabled=true;
+ setChecklistView(false);
+ document.body.classList.remove('editing');
+ render();
+ $('settings').close();
+ sync();
 };
 if(db.draft){let r=revision(db.draft.base,db.draft.text);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist()};render();window.addEventListener('pagehide',()=>{try{commit()}catch{}});window.addEventListener('online',sync);setInterval(()=>{if(document.visibilityState==='visible'&&(token||refresh))sync()},30000);
 async function start(){
