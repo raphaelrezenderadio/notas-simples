@@ -405,10 +405,10 @@ $('diagnose').onclick=async()=>{
    if(created?.id){try{await req(itemUrl(created.id),{method:'DELETE'})}catch{log('AVISO: marcador fictício no OneDrive pode exigir remoção manual')}}
    throw Error('ALERTA: OneDrive permitiu gravação fora da pasta do aplicativo; autorização deve ser removida');
   }catch(error){
-   if(error.code===403)outsideDenied=true;
+   if(error.code===403||error.code===404){outsideDenied=true;log('OK: OneDrive recusou o marcador fictício (HTTP '+error.code+')')}
    else throw error;
   }
-  check(outsideDenied,'OneDrive bloqueia gravação fora da pasta do aplicativo');
+  check(outsideDenied,'Nenhum arquivo foi criado fora da pasta do aplicativo');
   let name='NotasSimplesDiagnostico_'+id();let created=await (await req(itemUrl(root)+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
   let basePath='/me/drive/items/'+encodeURIComponent(folder);
   for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
