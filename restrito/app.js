@@ -79,9 +79,12 @@ function renderChecklist(){
    button.setAttribute('aria-checked',String(checked));
   };
   update();
-  button.onclick=()=>{
+  row.onclick=()=>{
    if(!itemAt(noteText.value,start))return;
-   noteText.setRangeText(noteText.value[start]===checkedItem?uncheckedItem:checkedItem,start,start+1,'preserve');
+   // The editor is hidden while marking items; update its value directly so
+   // tapping either the circle or the text works on iOS WebKit.
+   const marker=noteText.value[start]===checkedItem?uncheckedItem:checkedItem;
+   noteText.value=noteText.value.slice(0,start)+marker+noteText.value.slice(start+1);
    noteChanged();
    update();
   };
