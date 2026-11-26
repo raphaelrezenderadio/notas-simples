@@ -1,5 +1,5 @@
-const CACHE='notas-restrito-v1';
-const FILES=['./index.html','./style.css?v=16','./app.js?v=17','./format.js?v=14','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
+const CACHE='notas-restrito-v2';
+const FILES=['./index.html','./style.css?v=16','./app.js?v=18','./format.js?v=14','./manifest.webmanifest','./icon-192.png','./icon-512.png'];
 const assets=new Set(FILES.map(path=>new URL(path,self.registration.scope).href));
 
 self.addEventListener('install',event=>{

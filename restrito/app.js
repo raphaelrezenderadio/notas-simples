@@ -395,6 +395,11 @@ $('diagnose').onclick=async()=>{
   let rejected=false;try{await parse((await serialize(a)).replace('NS2','NS3'))}catch{rejected=true}check(rejected,'Rejeição de revisão inválida');
   check(heads([a,b,c]).length===2,'Preservação local de conflitos');
   const root=await appRoot();log('OK: autenticação Microsoft com acesso limitado à pasta do aplicativo');
+  // Probe an unguessable nonexistent path outside the app folder; never list or read personal files.
+  let outsideDenied=false;
+  try{await req('/me/drive/root:/NotasSimplesProvaBloqueio_'+id())}
+  catch(error){if(error.code===403)outsideDenied=true;else throw Error('Verificação externa inconclusiva: HTTP '+(error.code||'desconhecido'))}
+  check(outsideDenied,'OneDrive bloqueia acesso fora da pasta do aplicativo');
   let name='NotasSimplesDiagnostico_'+id();let created=await (await req(itemUrl(root)+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
   let basePath='/me/drive/items/'+encodeURIComponent(folder);
   for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
