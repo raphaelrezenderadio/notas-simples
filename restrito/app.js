@@ -1,7 +1,7 @@
 import {id,revision,serialize,parse,heads} from './format.js?v=14';
 const $=x=>document.getElementById(x), client='a5dd7257-54df-4026-bebc-817f7be96c9b', redirect='https://raphaelrezenderadio.github.io/notas-simples/restrito/', authority='https://login.microsoftonline.com/consumers/oauth2/v2.0/', fileScope='https://graph.microsoft.com/Files.ReadWrite.AppFolder', scope='openid profile offline_access '+fileScope, graph='https://graph.microsoft.com/v1.0';
-let mode=localStorage.getItem('ns-restrito-mode')==='real'?'real':'test', token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
-let diagnosing=false, starting=true;
+let token=null, expiry=0, refresh=null, active=null, running=false, timer, dirty=false;
+let starting=true;
 const sessionKey='ns-ms-appfolder-v1-'+client;
 const authKey='ns-auth-appfolder-v1-'+client;
 const approvedScopes=new Set(['openid','profile','offline_access','email','files.readwrite.appfolder']);
@@ -25,9 +25,10 @@ function restoreSession(){
 }
 function clearSession(){token=null;refresh=null;expiry=0;grantedScope='';try{sessionStorage.removeItem(sessionKey)}catch{}updateControls()}
 restoreSession();
-const key=()=> 'ns-mobile-appfolder-v1-'+mode, load=()=>JSON.parse(localStorage.getItem(key())||'{"rows":[],"pending":[],"draft":null}');let db=load();
-function persist(){localStorage.setItem(key(),JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
-function render(){ $('mode').textContent=mode==='test'?'Teste':'Real';let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';}
+// Keep the real-mode key unchanged so existing notes and unsent drafts survive this update.
+const key='ns-mobile-appfolder-v1-real', load=()=>JSON.parse(localStorage.getItem(key)||'{"rows":[],"pending":[],"draft":null}');let db=load();
+function persist(){localStorage.setItem(key,JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
+function render(){let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';}
 function commit(){clearTimeout(timer);if(!dirty||!active)return;let r=revision(active,$('text').value);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist();active=r;dirty=false;render();status('Salvo localmente · '+db.pending.length+' pendente(s)');}
 const uncheckedItem='☐', checkedItem='☑';
 const noteText=$('text'), checklistView=$('checklistView'), checklistMode=$('checklistMode');
@@ -134,10 +135,9 @@ $('back').onclick=()=>{commit();if(matchMedia('(max-width:650px)').matches)docum
 const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 async function login(){if(!client)throw Error('Login restrito ainda não configurado');commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem(authKey,JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
 function updateControls(){
- const busy=starting||running||diagnosing;
- for(const name of ['login','logout','real']) $(name).disabled=busy;
+ const busy=starting||running;
+ for(const name of ['login','logout']) $(name).disabled=busy;
  $('login').disabled=busy||!client;
- $('diagnose').disabled=starting||diagnosing;
  $('account').textContent=!client?'Login restrito ainda não configurado':starting?'Retomando sessão Microsoft…':
   token||refresh?'Sessão Microsoft neste navegador':'Microsoft desconectado';
 }
@@ -210,7 +210,7 @@ async function req(path,opt={}){
 }
 const itemUrl=id=>'/me/drive/items/'+encodeURIComponent(id);
 const path=(root,parts)=>itemUrl(root)+':/'+parts.map(encodeURIComponent).join('/');
-const base=()=>mode==='real'?['Dados']:['Teste','Dados'];
+const base=()=>['Dados'];
 async function appRoot(){
  const item=await (await req('/me/drive/special/approot')).json();
  if(typeof item.id!=='string'||!item.id||!item.folder)throw Error('Pasta do aplicativo indisponível');
@@ -229,15 +229,7 @@ async function ensure(root,parts){
    item=await (await req(folderPath)).json();
   }catch(error){
    if(error.code!==404)throw error;
-   if(mode==='real')throw Error('Copie a pasta Dados do Windows para a pasta do aplicativo no OneDrive.');
-   const parent=i?path(root,prefix.slice(0,-1))+':/children':itemUrl(root)+'/children';
-   try{
-    item=await (await req(parent,{method:'POST',headers:{'Content-Type':'application/json'},
-     body:JSON.stringify({name:prefix.at(-1),folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();
-   }catch(conflict){
-    if(conflict.code!==409)throw conflict;
-    item=await (await req(folderPath)).json();
-   }
+   throw Error('A pasta Dados não foi encontrada na pasta do aplicativo no OneDrive.');
   }
   if(!item.folder)throw Error('Não é pasta: '+prefix.at(-1));
  }
@@ -285,7 +277,7 @@ async function upload(root,parts,body,normalize=text=>text){
  }
 }
 async function sync(){
- if(starting||running||diagnosing)return;
+ if(starting||running)return;
  try{
   commit();
   if(!token&&!refresh){status('Salvo localmente · entre com Microsoft para sincronizar');return}
@@ -333,34 +325,17 @@ async function sync(){
  }
 }
 $('login').onclick=async()=>{
- if(starting||running||diagnosing)return;
+ if(starting||running)return;
  starting=true;
  updateControls();
  try{await login()}catch(error){starting=false;updateControls();$('account').textContent=error.message;status(error.message)}
 };
 $('logout').onclick=()=>{
- if(starting||running||diagnosing)return;
+ if(starting||running)return;
  commit();
  clearSession();
  status('Sessão encerrada neste aplicativo');
  $('settings').close();
-};
-$('real').onclick=()=>{
- if(starting||running||diagnosing)return;
- commit();
- if(mode==='test'&&!confirm('Antes de abrir as notas reais, faça uma cópia de segurança no Windows e copie a pasta Dados inteira para OneDrive/Apps/Notas Simples Restrito. Deseja continuar?'))return;
- mode=mode==='test'?'real':'test';
- localStorage.setItem('ns-restrito-mode',mode);
- db=load();
- active=null;
- dirty=false;
- $('text').value='';
- $('text').disabled=true;
- setChecklistView(false);
- document.body.classList.remove('editing');
- render();
- $('settings').close();
- sync();
 };
 if(db.draft){let r=revision(db.draft.base,db.draft.text);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist()};render();window.addEventListener('pagehide',()=>{try{commit()}catch{}});window.addEventListener('online',sync);setInterval(()=>{if(document.visibilityState==='visible'&&(token||refresh))sync()},30000);
 async function start(){
@@ -392,49 +367,5 @@ async function start(){
  updateControls();
  if(token||refresh)await sync();
 }
-
-// Diagnostic uses only a unique dedicated folder.
-$('closeReport').onclick=()=>{if(!diagnosing)$('diagnostic').close()};
-$('downloadReport').onclick=()=>{let u=URL.createObjectURL(new Blob([$('report').textContent],{type:'text/plain;charset=utf-8'}));let a=document.createElement('a');a.href=u;a.download='Relatorio_Notas_Mobile.txt';a.click();setTimeout(()=>URL.revokeObjectURL(u),30000)};
-$('diagnose').onclick=async()=>{
- if(starting||diagnosing)return;
- if(mode!=='test'){status('Volte ao modo Teste antes de executar o diagnóstico');$('settings').close();return}
- $('settings').close();$('diagnostic').showModal();$('report').textContent='NOTAS SIMPLES MOBILE — DIAGNÓSTICO 1.6\n'+new Date().toISOString()+'\n';$('downloadReport').disabled=true;diagnosing=true;updateControls();$('closeReport').disabled=true;
- const log=s=>{$('report').textContent+=s+'\n'};const check=(ok,name)=>{if(!ok)throw Error(name);log('OK: '+name)};
- let folder=null, passed=false, owned=false;
- try{
-  log('Aguardando sincronização anterior, se houver…');
-  const deadline=Date.now()+120000;while(running){if(Date.now()>deadline)throw Error('Sincronização anterior ainda em andamento; tente novamente');await new Promise(r=>setTimeout(r,200));}
-  running=true;owned=true;
-  let a=revision(null,'Diagnóstico fictício: ação, ç, ã, 📝\r\nSegunda linha');let b=revision(a,'Versão A');let c=revision(a,'Versão B');
-  check((await parse(await serialize(a))).text===a.text,'UTF-8 e checksum');
-  let rejected=false;try{await parse((await serialize(a)).replace('NS2','NS3'))}catch{rejected=true}check(rejected,'Rejeição de revisão inválida');
-  check(heads([a,b,c]).length===2,'Preservação local de conflitos');
-  const root=await appRoot();log('OK: autenticação Microsoft com acesso limitado à pasta do aplicativo');
-  // Try creating only a unique fictional marker at the root; never list or read personal files.
-  let outsideDenied=false;
-  try{
-   const probe=await req('/me/drive/root:/NotasSimplesProvaBloqueio_'+id()+'.txt:/content?@microsoft.graph.conflictBehavior=fail',{
-    method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body:'Teste fictício de permissão restrita'
-   });
-   const created=await probe.json();
-   if(created?.id){try{await req(itemUrl(created.id),{method:'DELETE'})}catch{log('AVISO: marcador fictício no OneDrive pode exigir remoção manual')}}
-   throw Error('ALERTA: OneDrive permitiu gravação fora da pasta do aplicativo; autorização deve ser removida');
-  }catch(error){
-   if(error.code===403||error.code===404){outsideDenied=true;log('OK: OneDrive recusou o marcador fictício (HTTP '+error.code+')')}
-   else throw error;
-  }
-  check(outsideDenied,'Nenhum arquivo foi criado fora da pasta do aplicativo');
-  let name='NotasSimplesDiagnostico_'+id();let created=await (await req(itemUrl(root)+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,folder:{},'@microsoft.graph.conflictBehavior':'fail'})})).json();folder=created.id;check(!!folder&&!!created.folder,'Criação de pasta isolada no OneDrive');
-  let basePath='/me/drive/items/'+encodeURIComponent(folder);
-  for(let r of [a,b,c]){let body=await serialize(r);await req(basePath+':/'+r.id+'.rev:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body});}
-  log('OK: gravação de três revisões fictícias');
-  let listing=await (await req(basePath+'/children')).json();let recovered=[];
-  for(let r of [a,b,c]){let f=listing.value.find(x=>x.name===r.id+'.rev');check(!!f,'Localização da revisão '+(r===a?'original':r===b?'A':'B'));let parsed=await parse(await downloadFile(f));check(await serialize(parsed)===await serialize(r),'Leitura e integridade da revisão');recovered.push(parsed)}
-  check(heads(recovered).length===2,'Conflitos preservados após leitura do OneDrive');
-  let snapshot='Nota fictícia em TXT: português';let item=await (await req(basePath+':/teste.txt:/content',{method:'PUT',headers:{'Content-Type':'text/plain; charset=utf-8'},body:snapshot})).json();check(await downloadFile(item)===snapshot,'Gravação e leitura TXT');passed=true;
- }catch(e){log('FALHA: '+(e.code?'HTTP '+e.code:String(e.message).replace(/https?:\/\/\S+/g,'[URL omitida]').slice(0,300)))}
- finally{if(folder){try{await req('/me/drive/items/'+encodeURIComponent(folder),{method:'DELETE'});log('OK: pasta fictícia removida (lixeira do OneDrive)')}catch{log('AVISO: pasta fictícia não removida; pode excluir NotasSimplesDiagnostico_ no OneDrive')}}log(passed?'RESULTADO: DIAGNÓSTICO APROVADO':'RESULTADO: DIAGNÓSTICO INCOMPLETO OU REPROVADO');log('NÃO TESTADO: sincronização real Windows/iPhone/Android, execução offline após reinício e aparência.');diagnosing=false;if(owned)running=false;updateControls();$('closeReport').disabled=false;$('downloadReport').disabled=false;}
-};
 
 start();
