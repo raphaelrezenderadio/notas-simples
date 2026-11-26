@@ -27,3 +27,5 @@ section{min-height:0;overflow:hidden}textarea{min-height:0}footer{flex-shrink:0}
  section,body.editing section{display:flex;flex:1;min-height:0;width:100%}
  textarea{padding:12px 14px}
 }
+
+#delete{font-size:18px}#trashList{max-height:45vh;overflow:auto}#trashList button{width:100%;text-align:left;overflow-wrap:anywhere}

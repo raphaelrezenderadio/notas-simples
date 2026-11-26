@@ -28,7 +28,7 @@ restoreSession();
 // Keep the real-mode key unchanged so existing notes and unsent drafts survive this update.
 const key='ns-mobile-appfolder-v1-real', load=()=>JSON.parse(localStorage.getItem(key)||'{"rows":[],"pending":[],"draft":null}');let db=load();
 function persist(){localStorage.setItem(key,JSON.stringify(db))}function status(s){$('status').textContent=s}function title(r){return r.text.split(/\r?\n/).find(s=>s.trim())?.trim()||'Nova nota'}
-function render(){let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';}
+function render(){let hs=heads(db.rows), q=$('search').value.toLocaleLowerCase();$('notes').replaceChildren();for(let r of hs.filter(r=>r.state!=='D'&&r.text.toLocaleLowerCase().includes(q))){let b=document.createElement('button');b.className=r.id===active?.id?'selected':'';b.textContent=(r.pin?'• ':'')+title(r)+(hs.filter(x=>x.note===r.note).length>1?' [conflito]':'');let small=document.createElement('small');small.textContent=new Date(Number((BigInt(r.time)-621355968000000000n)/10000n)).toLocaleString('pt-BR');b.append(small);b.onclick=()=>open(r);$('notes').append(b)} $('title').textContent=active?title(active):'Selecione uma nota';$('delete').hidden=!active;}
 function commit(){clearTimeout(timer);if(!dirty||!active)return;let r=revision(active,$('text').value);db.rows.push(r);db.pending.push(r.id);db.draft=null;persist();active=r;dirty=false;render();status('Salvo localmente · '+db.pending.length+' pendente(s)');}
 const uncheckedItem='☐', checkedItem='☑';
 const noteText=$('text'), checklistView=$('checklistView'), checklistMode=$('checklistMode');
@@ -134,6 +134,35 @@ function open(r){commit();active=r;$('text').disabled=false;$('text').value=r.te
 function noteChanged(){try{checklistMode.hidden=!hasChecklist(noteText.value);dirty=true;db.draft={base:active,text:$('text').value};persist();$('title').textContent=title({text:$('text').value});status('Rascunho salvo neste dispositivo');clearTimeout(timer);timer=setTimeout(()=>{try{commit();sync()}catch(e){status(e.message)}},900)}catch(e){status('Falha ao salvar localmente: '+e.message)}}
 noteText.oninput=noteChanged;
 $('new').onclick=()=>{try{commit();let r=revision(null,'');db.rows.push(r);db.pending.push(r.id);persist();open(r);noteText.focus();sync()}catch(e){status(e.message)}};
+function clearEditor(){active=null;dirty=false;noteText.value='';noteText.disabled=true;setChecklistView(false);document.body.classList.remove('editing');render()}
+$('delete').onclick=()=>{
+ if(!active||!confirm('Mover esta nota para a Lixeira? Você poderá restaurá-la.'))return;
+ try{
+  commit();
+  const deleted=revision(active,active.text);
+  deleted.state='D';
+  db.rows.push(deleted);db.pending.push(deleted.id);persist();
+  clearEditor();status('Nota na Lixeira · sincronização pendente');sync();
+ }catch(error){status('Falha ao apagar: '+error.message)}
+};
+function renderTrash(){
+ const list=$('trashList');list.replaceChildren();
+ const deleted=heads(db.rows).filter(r=>r.state==='D');
+ if(!deleted.length){const p=document.createElement('p');p.textContent='A Lixeira está vazia.';list.append(p);return}
+ for(const r of deleted){
+  const button=document.createElement('button');button.textContent='Restaurar · '+title(r);
+  button.onclick=()=>{
+   try{
+    const restored=revision(r,r.text);
+    db.rows.push(restored);db.pending.push(restored.id);persist();
+    $('trash').close();render();open(restored);status('Nota restaurada · sincronização pendente');sync();
+   }catch(error){status('Falha ao restaurar: '+error.message)}
+  };
+  list.append(button);
+ }
+}
+$('trashButton').onclick=()=>{$('settings').close();renderTrash();$('trash').showModal()};
+$('closeTrash').onclick=()=>$('trash').close();
 $('back').onclick=()=>{commit();if(matchMedia('(max-width:650px)').matches)document.body.classList.remove('editing');else $('list').classList.toggle('hidden')};$('search').oninput=render;$('menu').onclick=()=>$('settings').showModal();$('close').onclick=()=>$('settings').close();$('sync').onclick=()=>sync();
 const url64=a=>btoa(String.fromCharCode(...a)).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 async function login(){if(!client)throw Error('Login restrito ainda não configurado');commit();let verifier=url64(crypto.getRandomValues(new Uint8Array(32))),state=id(),challenge=url64(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier))));sessionStorage.setItem(authKey,JSON.stringify({verifier,state}));location.href=authority+'authorize?'+new URLSearchParams({client_id:client,response_type:'code',redirect_uri:redirect,response_mode:'query',scope,state,code_challenge:challenge,code_challenge_method:'S256',prompt:'select_account'})}
